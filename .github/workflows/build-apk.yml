@@ -3,7 +3,10 @@ name: Build Android APK
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -13,23 +16,76 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      - name: Install Android SDK platform and build tools
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Extract project ZIP and normalize Windows paths
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+
+          archive = Path("rea-test.zip")
+          root = Path("android-project")
+          if not archive.is_file():
+              raise SystemExit("rea-test.zip not found in repository root")
+
+          root.mkdir(parents=True, exist_ok=True)
+          with ZipFile(archive) as zf:
+              for item in zf.infolist():
+                  normalized = item.filename.replace("\\", "/")
+                  rel = PurePosixPath(normalized)
+                  if rel.is_absolute() or ".." in rel.parts:
+                      raise SystemExit(f"Unsafe ZIP path: {item.filename}")
+                  if not rel.parts:
+                      continue
+                  target = root.joinpath(*rel.parts)
+                  if item.is_dir() or normalized.endswith("/"):
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_bytes(zf.read(item))
+
+          required = [
+              root / "settings.gradle.kts",
+              root / "build.gradle.kts",
+              root / "app" / "build.gradle.kts",
+          ]
+          missing = [str(p) for p in required if not p.is_file()]
+          if missing:
+              raise SystemExit("Incomplete Android project; missing: " + ", ".join(missing))
+
+          print("Android project extracted successfully.")
+          print("Gradle wrapper script present:", (root / "gradlew").is_file())
+          print("Gradle wrapper JAR present:", (root / "gradle/wrapper/gradle-wrapper.jar").is_file())
+          PY
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug
+        shell: bash
+        run: |
+          cd android-project
+          gradle --no-daemon --stacktrace assembleDebug
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: AdGuardLite-Debug-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: android-project/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
